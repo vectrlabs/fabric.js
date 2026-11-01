@@ -273,6 +273,12 @@ export class SelectableCanvas<EventSpec extends CanvasEvents = CanvasEvents>
     y: number;
     deltaX: number;
     deltaY: number;
+    /**
+     * `selectionKey` was held when the box selection started, meaning the
+     * objects collected by the box have to be added to the current selection
+     * instead of replacing it
+     */
+    additive?: boolean;
   } | null = null;
 
   /**

@@ -1124,11 +1124,17 @@ export class Canvas extends SelectableCanvas implements CanvasOptions {
       shouldRender = true;
     } else if (this._shouldClearSelection(e, target)) {
       const objs = this.getActiveObjects();
-      this.discardActiveObject(e);
-      // 多选取消，重置Coords， 防止无法再次选中
-      objs.forEach((obj) => obj.setCoords());
-      if (!target && this.switchIsolateObject(e)) {
-        return;
+      // holding the selection key keeps the current selection alive so that the
+      // following box selection (or click) can add to it instead of replacing it
+      const additive =
+        !!objs.length && !!this.selection && this._isSelectionKeyPressed(e);
+      if (!additive) {
+        this.discardActiveObject(e);
+        // 多选取消，重置Coords， 防止无法再次选中
+        objs.forEach((obj) => obj.setCoords());
+        if (!target && this.switchIsolateObject(e)) {
+          return;
+        }
       }
     }
     // we start a group selector rectangle if
@@ -1150,6 +1156,9 @@ export class Canvas extends SelectableCanvas implements CanvasOptions {
         y: p.y,
         deltaY: 0,
         deltaX: 0,
+        // capture the modifier now: releasing the key during the drag
+        // must not turn an additive selection into a replacing one
+        ...(this._isSelectionKeyPressed(e) ? { additive: true } : {}),
       };
     }
 
@@ -1575,13 +1584,15 @@ export class Canvas extends SelectableCanvas implements CanvasOptions {
     if (!this.selection || !this._groupSelector) {
       return false;
     }
-    const { x, y, deltaX, deltaY } = this._groupSelector,
+    const { x, y, deltaX, deltaY, additive } = this._groupSelector,
       point1 = new Point(x, y),
       point2 = point1.add(new Point(deltaX, deltaY)),
       tl = point1.min(point2),
       br = point1.max(point2),
       size = br.subtract(tl);
 
+    // the box only collects the first level objects of the current selection scope,
+    // meaning the children of the isolated group, or the canvas root objects
     const collectedObjects = this.collectObjects(
       this.getSearchTargets(),
       {
@@ -1592,6 +1603,16 @@ export class Canvas extends SelectableCanvas implements CanvasOptions {
       },
       { includeIntersecting: !this.selectionFullyContained },
     ) as FabricObject[];
+
+    // cleanup
+    this._groupSelector = null;
+
+    // the selection key was held while dragging and there is something to add to:
+    // keep the current selection and merge the collected objects into it
+    if (additive && this.getActiveObjects().length) {
+      this.addToActiveSelection(e, collectedObjects);
+      return true;
+    }
 
     const objects =
       // though this method runs only after mouse move the pointer could do a mouse up on the same position as mouse down
@@ -1618,9 +1639,69 @@ export class Canvas extends SelectableCanvas implements CanvasOptions {
       this.setActiveObject(new klass(objects, { canvas: this }), e);
     }
 
-    // cleanup
-    this._groupSelector = null;
     return true;
+  }
+
+  /**
+   * Merges the objects collected by a box selection into the current selection.
+   * Only objects belonging to the current selection scope are taken into account:
+   * the first level children of the isolated group, or the canvas root objects
+   * when no group is isolated. Previously selected objects outside of that scope
+   * are removed from the selection, since a selection can't mix objects coming
+   * from different containers.
+   * @private
+   */
+  protected addToActiveSelection(
+    e: TPointerEvent,
+    collectedObjects: FabricObject[],
+  ) {
+    const prevActiveObjects = this.getActiveObjects(),
+      scope = this.getSearchTargets(),
+      kept = prevActiveObjects.filter((object) => scope.includes(object)),
+      dropped = prevActiveObjects.filter((object) => !scope.includes(object)),
+      added = collectedObjects.filter(
+        (object) =>
+          !prevActiveObjects.includes(object) && !object.onSelect({ e }),
+      );
+
+    if (!kept.length && !added.length) {
+      // the box didn't add anything and nothing of the current selection
+      // belongs to this scope
+      dropped.length && this.discardActiveObject(e);
+      return;
+    }
+
+    const activeObject = this._activeObject;
+    if (isActiveSelection(activeObject)) {
+      dropped.length && activeObject.remove(...dropped);
+      added.length && activeObject.multiSelectAdd(...added);
+      if (activeObject.size() === 1) {
+        // deselecting the active selection returns the last remaining object to the canvas
+        this._setActiveObject(activeObject.item(0), e);
+      }
+      this._fireSelectionEvents(prevActiveObjects, e);
+      return;
+    }
+
+    const objects = kept.concat(added);
+    if (objects.length === 1) {
+      objects[0] !== activeObject && this.setActiveObject(objects[0], e);
+      return;
+    }
+
+    // build the active selection out of the kept and the newly collected objects
+    const klass =
+      classRegistry.getClass<typeof ActiveSelection>('ActiveSelection');
+    const newActiveSelection = new klass([], {
+      /**
+       * it is crucial to pass the canvas ref before calling {@link ActiveSelection#multiSelectAdd}
+       * since it uses {@link FabricObject#isInFrontOf} which relies on the canvas ref
+       */
+      canvas: this,
+    });
+    newActiveSelection.multiSelectAdd(...objects);
+    this._setActiveObject(newActiveSelection, e);
+    this._fireSelectionEvents(prevActiveObjects, e);
   }
 
   /**
