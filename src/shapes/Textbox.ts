@@ -925,7 +925,10 @@ export class Textbox<
     }
 
     // 处理文字的水平偏移
-    spanOffX = options.left - (minSpanX || 0);
+    // 只有当 tspan 显式携带 x/dx 位置（minSpanX 非空）时，tspan 的 x 才是相对
+    // <text> 原点的偏移量，需要换算成绝对坐标；否则 <text> 上的 x 本身就是绝对坐标，
+    // 直接使用，避免把整个 left 减掉导致 X 轴整体偏移（GPT 等标准 SVG 常见）。
+    spanOffX = minSpanX != null ? options.left - minSpanX : 0;
 
     // textAlign保持和parsedAnchor一致
     options.textAlign = parsedAnchor;
